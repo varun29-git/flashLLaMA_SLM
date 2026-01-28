@@ -14,12 +14,14 @@ def get_model(vocab_size):
     return build_llama(
         vocab_size=vocab_size,
         d_model=D_MODEL,
-        n_layers=N_LAYERS,
-        n_q_heads=N_Q_HEADS,
-        n_kv_heads=N_KV_HEADS,
+        num_layers=N_LAYERS,
+        num_q_heads=N_Q_HEADS,
+        num_kv_heads=N_KV_HEADS,
         d_ff=D_FF,
         dropout=DROPOUT
     )
+
+# (vocab_size, d_model=1024, num_layers=12, num_q_heads=8, num_kv_heads=8, d_ff=2048, dropout=0.1)
 
 
 def train_one_epoch(
