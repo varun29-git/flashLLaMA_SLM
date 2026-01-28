@@ -1,15 +1,12 @@
-# Core
-torch
-numpy
+# Core deep learning
+torch>=2.1.0
+numpy>=1.24.0
 
 # Tokenization
-tiktoken
+tiktoken>=0.6.0
 
-# Datasets (streaming)
-datasets
+# Streaming datasets
+datasets>=2.16.0
 
-# Progress / utilities
-tqdm
-
-# Optional but recommended (better perf / stability)
-accelerate
+# Progress bars / logging
+tqdm>=4.66.0

@@ -4,6 +4,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from pathlib import Path
 import warnings
+import time
+import math
+from collections import deque
 
 from config import *
 from model import build_llama
@@ -21,8 +24,6 @@ def get_model(vocab_size):
         dropout=DROPOUT
     )
 
-# (vocab_size, d_model=1024, num_layers=12, num_q_heads=8, num_kv_heads=8, d_ff=2048, dropout=0.1)
-
 
 def train_one_epoch(
     model,
@@ -33,9 +34,23 @@ def train_one_epoch(
     device,
     epoch,
     global_step,
+    total_steps,
+    run_start_time,
 ):
     model.train()
-    pbar = tqdm(dataloader, total=STEPS_PER_EPOCH, desc=f"Epoch {epoch+1}")
+
+    # Rolling stats
+    loss_window = deque(maxlen=50)
+    epoch_start_time = time.time()
+    tokens_seen = 0
+
+    pbar = tqdm(
+        dataloader,
+        total=STEPS_PER_EPOCH,
+        desc=f"Epoch {epoch+1}/{EPOCHS}",
+        dynamic_ncols=True,
+        leave=True
+    )
 
     for step, batch in enumerate(pbar):
         if step >= STEPS_PER_EPOCH:
@@ -58,8 +73,28 @@ def train_one_epoch(
         optimizer.step()
         scheduler.step()
 
+        # ---- stats ----
+        loss_window.append(loss.item())
+        tokens_seen += input_ids.numel()
         global_step += 1
-        pbar.set_postfix(loss=loss.item())
+
+        elapsed = time.time() - epoch_start_time
+        run_elapsed = time.time() - run_start_time
+
+        tok_per_sec = tokens_seen / max(elapsed, 1e-6)
+        avg_loss = sum(loss_window) / len(loss_window)
+        lr = scheduler.get_last_lr()[0]
+
+        steps_left = total_steps - global_step
+        eta_seconds = steps_left * (run_elapsed / max(global_step, 1))
+        eta_hours = eta_seconds / 3600
+
+        pbar.set_postfix({
+            "loss": f"{avg_loss:6.3f}",
+            "lr": f"{lr:.2e}",
+            "tok/s": f"{tok_per_sec/1000:.1f}k",
+            "ETA(h)": f"{eta_hours:5.2f}"
+        })
 
     return global_step
 
@@ -79,12 +114,15 @@ def train(iterable_ds):
     train_loader = DataLoader(
         train_dataset,
         batch_size=BATCH_SIZE,
-        num_workers=0,      # IMPORTANT
+        num_workers=0,   # correct for IterableDataset
         pin_memory=True
     )
 
     vocab_size = 100277  # cl100k_base
     model = get_model(vocab_size).to(device)
+
+    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model parameters: {n_params:,}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -103,9 +141,17 @@ def train(iterable_ds):
     )
 
     global_step = 0
+    run_start_time = time.time()
+
+    print("\n" + "=" * 70)
+    print(f"Starting Training | {EPOCHS} epochs | {total_steps:,} steps")
+    print("=" * 70)
 
     for epoch in range(EPOCHS):
-        print(f"\nEpoch {epoch+1}/{EPOCHS}")
+        print("\n" + "-" * 60)
+        print(f"Epoch {epoch+1}/{EPOCHS}")
+        print("-" * 60)
+
         global_step = train_one_epoch(
             model,
             train_loader,
@@ -114,7 +160,9 @@ def train(iterable_ds):
             loss_fn,
             device,
             epoch,
-            global_step
+            global_step,
+            total_steps,
+            run_start_time
         )
 
         ckpt = Path(MODEL_FOLDER) / f"checkpoint_epoch_{epoch:02d}.pt"
@@ -127,9 +175,13 @@ def train(iterable_ds):
             },
             ckpt
         )
-        print(f"Checkpoint saved: {ckpt}")
+        print(f"✓ Checkpoint saved: {ckpt}")
 
-    print("Training complete.")
+    total_hours = (time.time() - run_start_time) / 3600
+    print("\n" + "=" * 70)
+    print(f"Training complete in {total_hours:.2f} hours")
+    print("=" * 70)
+
     return model
 
 
