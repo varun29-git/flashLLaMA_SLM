@@ -1,12 +1,8 @@
-# Core deep learning
-torch>=2.1.0
-numpy>=1.24.0
-
-# Tokenization
-tiktoken>=0.6.0
-
-# Streaming datasets
-datasets>=2.16.0
-
-# Progress bars / logging
-tqdm>=4.66.0
+torch
+tiktoken
+datasets
+tqdm
+pathlib
+time
+warnings
+collections

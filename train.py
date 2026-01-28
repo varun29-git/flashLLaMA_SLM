@@ -12,7 +12,7 @@ from config import *
 from model import build_llama
 from dataset import StreamingLanguageModelDataset
 
-ESTIMATED_TOTAL_TOKENS = 2_950_000_000
+ESTIMATED_TOTAL_TOKENS = 2_970_000_000
 
 LR_PHASE_1 = 3e-4  
 LR_PHASE_2 = 1e-4  
@@ -29,11 +29,69 @@ def get_model(vocab_size):
         dropout=DROPOUT
     )
 
-def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, target_lr, vocab_size, max_tokens=None, global_tracker=None):
+def validate(model, dataset_name, device, steps=50):
+    """Runs a quick validation loop on the validation or test split."""
+    print(f"\n--- Running Validation for {dataset_name} ---")
+    model.eval()
+    
+    ds = None
+    try:
+        # Try validation split first
+        ds = load_dataset(dataset_name, split="validation", streaming=True)
+    except Exception:
+        try:
+            # Fallback to test split
+            ds = load_dataset(dataset_name, split="test", streaming=True)
+        except Exception:
+            print(f"No validation/test split found for {dataset_name}. Skipping validation.")
+            model.train()
+            return None
+
+    val_dataset = StreamingLanguageModelDataset(
+        ds,
+        seq_len=SEQ_LEN,
+        tokenizer_name="cl100k_base"
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        num_workers=0
+    )
+    
+    val_loss_accum = 0.0
+    steps_done = 0
+    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    
+    with torch.no_grad():
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            for i, batch in enumerate(val_loader):
+                if i >= steps:
+                    break
+                
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                targets = batch["targets"].to(device, non_blocking=True)
+                
+                logits = model(input_ids)
+                loss = loss_fn(
+                    logits.view(-1, logits.size(-1)),
+                    targets.view(-1)
+                )
+                val_loss_accum += loss.item()
+                steps_done += 1
+    
+    avg_val_loss = val_loss_accum / max(steps_done, 1)
+    print(f"Validation Loss: {avg_val_loss:.4f}")
+    
+    model.train()
+    return avg_val_loss
+
+
+def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, target_lr, vocab_size, max_tokens=None, global_tracker=None, soft_cap=False):
     device = next(model.parameters()).device
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     
-    # Update Learning Rate for this phase
+    # Update Learning Rate 
     for param_group in optimizer.param_groups:
         param_group['lr'] = target_lr
         
@@ -43,7 +101,8 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
     print(f"Epochs: {num_epochs} (Logical Passes)")
     print(f"Learning Rate: {target_lr}")
     if max_tokens:
-        print(f"Token Cap: {max_tokens:,}")
+        cap_type = "Soft (Finish Book)" if soft_cap else "Hard (Immediate Stop)"
+        print(f"Token Cap: {max_tokens:,} [{cap_type}]")
     else:
         print("Token Cap: None (Full Dataset Phase)")
     print("=" * 80)
@@ -55,32 +114,32 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
         
         # Load Dataset Stream (Restarted each epoch)
         try:
-            if dataset_name == "bookcorpus" or dataset_name == "rojagtap/bookcorpus":
+            if dataset_name == "incredible45/Gutenberg-BookCorpus-Cleaned-Data-English":
                 ds = load_dataset(dataset_name, split="train", streaming=True)
+                # Map 'context' to 'text' 
+                ds = ds.rename_column("context", "text")
+            elif dataset_name == "HuggingFaceFW/fineweb-edu":
+                # Use the sample-10BT 
+                ds = load_dataset(dataset_name, name="sample-10BT", split="train", streaming=True)
             else:
                 ds = load_dataset(dataset_name, split="train", streaming=True)
             
-            # Show Sample (from middle to avoid boilerplate)
-            print(f"\n[Sample from {dataset_name}]")
-            try:
-                sample_item = next(iter(ds))
-                text = sample_item['text']
-                mid_point = len(text) // 2
-                # Ensure we have enough text, else take what's available
-                start = max(0, mid_point - 150)
-                end = min(len(text), mid_point + 150)
-                print(f"...{text[start:end]}...\n")
-            except Exception as e:
-                print(f"Could not fetch sample: {e}")
+
+            
+            # Sample display removed as requested
 
         except Exception as e:
             print(f"Error loading dataset {dataset_name}: {e}")
             return
 
+        # Pass max_tokens to dataset ONLY if soft_cap is True
+        ds_max_tokens = max_tokens if soft_cap else None
+        
         train_dataset = StreamingLanguageModelDataset(
             ds,
             seq_len=SEQ_LEN,
-            tokenizer_name="cl100k_base"
+            tokenizer_name="cl100k_base",
+            max_tokens=ds_max_tokens
         )
         
         dataloader = DataLoader(
@@ -93,8 +152,6 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
         model.train()
         loss_window = deque(maxlen=50)
         
-        # bar_format string to match user request: "Processing Epoch00: 100%|...| [time, rate, postfix]"
-        # Hides the "n/total" part.
         pbar = tqdm(
             dataloader, 
             desc=f"Processing Epoch{epoch:02d}", 
@@ -106,11 +163,10 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             targets = batch["targets"].to(device, non_blocking=True)
             
-            # --- TOKEN ACCOUNTING ---
             batch_tokens = input_ids.numel()
             
-            # Phase Cap Check
-            if max_tokens is not None and (total_phase_tokens + batch_tokens > max_tokens):
+            # Hard Cap Check: Only if soft_cap is False
+            if not soft_cap and max_tokens is not None and (total_phase_tokens + batch_tokens > max_tokens):
                 print(f"\n[STOP] Token Cap Reached for {phase_name}: {total_phase_tokens + batch_tokens:,} > {max_tokens:,}")
                 return  # End Phase Immediately
             
@@ -120,7 +176,6 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
             if global_tracker:
                 global_tracker['tokens_seen'] += batch_tokens
 
-            # --- OPTIMIZATION STEP ---
             optimizer.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type=device.type, dtype=torch.float16):
@@ -150,9 +205,11 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
                 eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
 
             pbar.set_description(f"Processing Epoch{epoch:02d}")
-            pbar.set_postfix_str(f"loss:={avg_loss:.3f}, G-ETA={eta_str}")
             
         print(f"Epoch {epoch+1} Complete. Tokens so far: {total_phase_tokens:,}")
+        
+        # Validation Step
+        validate(model, dataset_name, device)
 
 
 def train():
@@ -207,30 +264,33 @@ def train():
         model=model,
         optimizer=optimizer,
         scaler=scaler,
-        dataset_name="rojagtap/bookcorpus", 
-        phase_name="Phase 2 (BookCorpus)",
-        num_epochs=2,
+        dataset_name="incredible45/Gutenberg-BookCorpus-Cleaned-Data-English", 
+        phase_name="Phase 2 (Gutenberg-BookCorpus-Cleaned-Data-English)",
+        num_epochs=1, # Soft Cap controls duration within epoch
         target_lr=LR_PHASE_2,
         vocab_size=vocab_size,
-        max_tokens=None, # Use Full Dataset
-        global_tracker=global_tracker
+        max_tokens=500_000_000, # SOFT CAP AT 500 MILLION
+        global_tracker=global_tracker,
+        soft_cap=True
     )
     
     torch.save(model.state_dict(), f"{MODEL_FOLDER}/checkpoint_phase2.pt")
 
     # PHASE 3
     
+
     train_phase(
         model=model,
         optimizer=optimizer,
         scaler=scaler,
-        dataset_name="Skylion007/openwebtext",
-        phase_name="Phase 3 (OpenWebText)",
-        num_epochs=1,
+        dataset_name="HuggingFaceFW/fineweb-edu",
+        phase_name="Phase 3 (FineWeb-Edu 1B)",
+        num_epochs=2,
         target_lr=LR_PHASE_3,
         vocab_size=vocab_size,
-        max_tokens=500_000_000, # CAP AT 500 MILLION
-        global_tracker=global_tracker
+        max_tokens=1_000_000_000, # 1B per epoch 
+        global_tracker=global_tracker,
+        soft_cap=True
     )
     
     torch.save(model.state_dict(), f"{MODEL_FOLDER}/model_final.pt")
