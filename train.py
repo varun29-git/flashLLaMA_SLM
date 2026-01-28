@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from pathlib import Path
 import warnings
 import time
@@ -45,14 +45,13 @@ def train_one_epoch(
     tokens_seen = 0
 
     pbar = tqdm(
-        dataloader,
-        total=STEPS_PER_EPOCH,
-        desc=f"Epoch {epoch+1}/{EPOCHS}",
-        dynamic_ncols=True,
-        leave=True
-    )
+    total=STEPS_PER_EPOCH,
+    desc=f"Epoch {epoch+1}/{EPOCHS}",
+    dynamic_ncols=True,
+    leave=True
+)
 
-    for step, batch in enumerate(pbar):
+    for step, batch in enumerate(dataloader):
         if step >= STEPS_PER_EPOCH:
             break
 
@@ -95,6 +94,9 @@ def train_one_epoch(
             "tok/s": f"{tok_per_sec/1000:.1f}k",
             "ETA(h)": f"{eta_hours:5.2f}"
         })
+        pbar.update(1)
+    
+    pbar.close()
 
     return global_step
 
