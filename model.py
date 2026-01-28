@@ -138,7 +138,7 @@ class GQA_Flash_RoPE(nn.Module):
         dim = torch.arange(0, d_k, 2, device=device)  # (d_k/2,)
         
         # Inverse frequency
-        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_k, 2).float() / d_k))
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
         angles = pos[:, None] * inv_freq[None, :]     # (T, d_k/2)
 
         # Sine and cosine
