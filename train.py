@@ -102,7 +102,7 @@ def train_one_epoch(
     return global_step
 
 
-def train(iterable_ds):
+def train(iterable_ds, dataset_name="Custom Dataset", dataset_sample=""):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -123,6 +123,12 @@ def train(iterable_ds):
 
     vocab_size = 100277  # cl100k_base
     model = get_model(vocab_size).to(device)
+
+    print("\n" + "=" * 70)
+    print(f"Dataset: {dataset_name}")
+    print("-" * 70)
+    print(f"Sample:\n{dataset_sample}...")
+    print("=" * 70)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
@@ -181,8 +187,15 @@ def train(iterable_ds):
         print(f"✓ Checkpoint saved: {ckpt}")
 
     total_hours = (time.time() - run_start_time) / 3600
+    
+    # Chinchilla Ratio
+    total_tokens = global_step * BATCH_SIZE * SEQ_LEN
+    chinchilla_ratio = total_tokens / n_params
+
     print("\n" + "=" * 70)
     print(f"Training complete in {total_hours:.2f} hours")
+    print(f"Total Tokens: {total_tokens:,}")
+    print(f"Chinchilla Ratio: {chinchilla_ratio:.2f} tokens/param")
     print("=" * 70)
 
     return model
@@ -202,4 +215,10 @@ if __name__ == "__main__":
         seed=42
     )
 
-    train(mixed_iterable)
+    dataset_composition = "TinyStories (60%) + OpenWebText (40%)"
+    
+    # Peek at one sample
+    sample_item = next(iter(mixed_iterable))
+    sample_text = sample_item["text"][:500] # Take first 500 chars for display
+
+    train(mixed_iterable, dataset_name=dataset_composition, dataset_sample=sample_text)
