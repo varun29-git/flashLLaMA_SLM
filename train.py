@@ -55,8 +55,8 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
         
         # Load Dataset Stream (Restarted each epoch)
         try:
-            if dataset_name == "bookcorpus":
-                ds = load_dataset(dataset_name, split="train", streaming=True, trust_remote_code=True)
+            if dataset_name == "bookcorpus" or dataset_name == "rojagtap/bookcorpus":
+                ds = load_dataset(dataset_name, split="train", streaming=True)
             else:
                 ds = load_dataset(dataset_name, split="train", streaming=True)
             
@@ -88,9 +88,14 @@ def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, 
         model.train()
         loss_window = deque(maxlen=50)
         
-        # bar_format string to match user request: "Processing Epoch00: 100% ... [time, rate, loss]"
-        # We start with a standard format but customize descriptions.
-        pbar = tqdm(dataloader, desc=f"Processing Epoch{epoch:02d}", dynamic_ncols=True)
+        # bar_format string to match user request: "Processing Epoch00: 100%|...| [time, rate, postfix]"
+        # Hides the "n/total" part.
+        pbar = tqdm(
+            dataloader, 
+            desc=f"Processing Epoch{epoch:02d}", 
+            dynamic_ncols=True,
+            bar_format="{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}, {rate_fmt}{postfix}]"
+        )
         
         for batch in pbar:
             input_ids = batch["input_ids"].to(device, non_blocking=True)
@@ -182,10 +187,10 @@ def train():
         scaler=scaler,
         dataset_name="roneneldan/TinyStories",
         phase_name="Phase 1 (TinyStories)",
-        num_epochs=2,
+        num_epochs=1,
         target_lr=LR_PHASE_1,
         vocab_size=vocab_size,
-        max_tokens=None, # Use Full Dataset
+        max_tokens=100, # CAP AT 100 TOKENS (TESTING)
         global_tracker=global_tracker
     )
     
@@ -219,7 +224,7 @@ def train():
         num_epochs=1,
         target_lr=LR_PHASE_3,
         vocab_size=vocab_size,
-        max_tokens=1_000_000_000, # CAP AT 1 BILLION
+        max_tokens=500_000_000, # CAP AT 500 MILLION
         global_tracker=global_tracker
     )
     
