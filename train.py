@@ -14,32 +14,28 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-ESTIMATED_TOTAL_TOKENS = 1_725_000_000
-LR_PHASE_1 = 3e-4
+ESTIMATED_TOTAL_TOKENS = 1_675_000_000
+LR_PHASE_1 = 2e-4
 
 # Constants for Schedule
 PHASE1_DURATION = 525_000_000
-PHASE2_DURATION = 1_200_000_000
+PHASE2_DURATION = 1_150_000_000
 TOTAL_TRAINING_TOKENS = PHASE1_DURATION + PHASE2_DURATION
 
 def get_lr(tokens_seen):
     # Phase 1: 0 - 625M
     if tokens_seen < PHASE1_DURATION:
-        # Constant 3e-4 for first 180M
+        # Constant 2e-4 for first 180M
         if tokens_seen < 180_000_000:
-            return 3e-4
+            return 2e-4
         
-        # Cosine Decay 3e-4 -> 3e-5 (180M to 625M)
+        # Cosine Decay 2e-4 -> 2e-5 (180M to 625M)
         progress = (tokens_seen - 180_000_000) / (PHASE1_DURATION - 180_000_000)
         progress = max(0.0, min(1.0, progress))
-        # decay from 3e-4 to 3e-5
-        # coeff = 0.5 * (1 + cos(pi * progress))
-        # lr = min + (max - min) * coeff
+        # decay from 2e-4 to 2e-5
         
-        # Standard cosine decay usually goes to 0 or min. 
-        # Here we want to go from 3e-4 to 3e-5.
-        target_min = 3e-5
-        target_max = 3e-4
+        target_min = 2e-5
+        target_max = 2e-4
         cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
         return target_min + (target_max - target_min) * cosine_decay
 
@@ -47,22 +43,22 @@ def get_lr(tokens_seen):
     else:
         phase2_tokens = tokens_seen - PHASE1_DURATION
         
-        # Linear Warmup 3e-5 -> 1.5e-4 (over 50M tokens)
+        # Linear Warmup 2e-5 -> 1e-4 (over 50M tokens)
         if phase2_tokens < 50_000_000:
             progress = phase2_tokens / 50_000_000
-            start_lr = 3e-5
-            end_lr = 1.5e-4
+            start_lr = 2e-5
+            end_lr = 1e-4
             return start_lr + (end_lr - start_lr) * progress
             
-        # Cosine Decay 1.5e-4 -> 1.5e-5 (remaining 1.15B)
+        # Cosine Decay 1e-4 -> 1e-5 (remaining 1.15B)
         else:
             decay_tokens = phase2_tokens - 50_000_000
             total_decay_duration = PHASE2_DURATION - 50_000_000
             progress = decay_tokens / total_decay_duration
             progress = max(0.0, min(1.0, progress))
             
-            target_min = 1.5e-5
-            target_max = 1.5e-4
+            target_min = 1e-5
+            target_max = 1e-4
             cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
             return target_min + (target_max - target_min) * cosine_decay  
 
@@ -236,7 +232,7 @@ def train_mixed_phase_1(model, optimizer, scaler, vocab_size, global_tracker=Non
              eta_seconds = remaining / max(rate, 1e-6)
              eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
 
-        pbar.set_description(f"P1 | TS% {p_ts*100:.1f} | LR {current_lr:.2e} | ETA: {eta_str} | L: {avg_loss:.4f}")
+        pbar.set_description(f"P1|TS{p_ts:.0%}|LR{current_lr:.1e}|ETA:{eta_str}|L{avg_loss:.2f}")
 
     pbar.close()
     print(f"Phase 1 Complete. Tokens: {total_phase_tokens:,}")
@@ -335,7 +331,7 @@ def train_phase_2(model, optimizer, scaler, vocab_size, global_tracker=None):
              eta_seconds = remaining / max(rate, 1e-6)
              eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
 
-        pbar.set_description(f"P2 | LR {current_lr:.2e} | ETA: {eta_str} | L: {avg_loss:.4f}")
+        pbar.set_description(f"P2|LR{current_lr:.1e}|ETA:{eta_str}|L{avg_loss:.2f}")
 
     pbar.close()
     print(f"Phase 2 Complete. Tokens: {total_phase_tokens:,}")
