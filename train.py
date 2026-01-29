@@ -11,8 +11,9 @@ from datasets import load_dataset
 from config import *
 from model import build_llama
 from dataset import StreamingLanguageModelDataset
+import random
 
-ESTIMATED_TOTAL_TOKENS = 1_800_000_000
+ESTIMATED_TOTAL_TOKENS = 1_825_000_000
 
 LR_PHASE_1 = 3e-4  
 LR_PHASE_2 = 1e-4  
@@ -85,6 +86,128 @@ def validate(model, dataset_name, device, steps=50):
     
     model.train()
     return avg_val_loss
+
+
+    return avg_val_loss
+
+
+def train_mixed_phase(model, optimizer, scaler, vocab_size, global_tracker=None):
+    device = next(model.parameters()).device
+    loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    
+    # Configuration for Mix
+    target_ts_tokens = 75_000_000
+    target_gb_tokens = 550_000_000
+    
+    # Calculate Mix Strategy
+    # Average Ratio = 0.3 (linear 0.6 -> 0.0)
+    # Duration of Mix = 75M / 0.3 = 250M
+    mix_duration = 250_000_000
+    total_duration = 250_000_000 + (target_gb_tokens - 175_000_000) # 250M + 375M = 625M
+    
+    phase_name = "Mixed Phase (TS 60%->0% | GB 40%->100%)"
+    print("\n" + "=" * 80)
+    print(f"STARTING PHASE: {phase_name}")
+    print(f"Total Tokens: {total_duration:,}")
+    print(f"  - TinyStories: {target_ts_tokens:,}")
+    print(f"  - Gutenberg: {target_gb_tokens:,}")
+    print("=" * 80)
+
+    # Initialize Datasets
+    ds_ts = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
+    ds_gb = load_dataset("incredible45/Gutenberg-BookCorpus-Cleaned-Data-English", split="train", streaming=True).rename_column("context", "text")
+
+    dl_ts = DataLoader(StreamingLanguageModelDataset(ds_ts, SEQ_LEN, "cl100k_base"), batch_size=BATCH_SIZE, num_workers=0)
+    dl_gb = DataLoader(StreamingLanguageModelDataset(ds_gb, SEQ_LEN, "cl100k_base"), batch_size=BATCH_SIZE, num_workers=0)
+
+    iter_ts = iter(dl_ts)
+    iter_gb = iter(dl_gb)
+
+    total_phase_tokens = 0
+    
+    # Progress Bar
+    pbar = tqdm(total=total_duration // (BATCH_SIZE * SEQ_LEN), desc="Mixed Training", dynamic_ncols=True)
+    
+    # Set LR for Phase 1/2 blend (using Phase 1 LR for now or decaying? implementation plan didn't specify, using LR_PHASE_1)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = LR_PHASE_1
+
+    model.train()
+    loss_window = deque(maxlen=50)
+    optimizer.zero_grad(set_to_none=True)
+    
+    step = 0
+    while total_phase_tokens < total_duration:
+        step += 1
+        
+        # Calculate Current Ratio
+        if total_phase_tokens < mix_duration:
+            progress = total_phase_tokens / mix_duration
+            p_ts = 0.6 * (1.0 - progress)
+        else:
+            p_ts = 0.0
+            
+        # Select Batch
+        use_ts = random.random() < p_ts
+        
+        try:
+            if use_ts:
+                batch = next(iter_ts)
+            else:
+                batch = next(iter_gb)
+        except StopIteration:
+            # Restart iterator if exhausted (unlikely for GB, possible for TS if small)
+             # But here we assume streaming is infinite or cycles? 
+             # Streamingdatasets loop? No, HF streaming raises StopIteration.
+             # Re-init iter
+            if use_ts:
+                iter_ts = iter(dl_ts)
+                batch = next(iter_ts)
+            else:
+                iter_gb = iter(dl_gb)
+                batch = next(iter_gb)
+
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        targets = batch["targets"].to(device, non_blocking=True)
+        
+        batch_tokens = input_ids.numel()
+        total_phase_tokens += batch_tokens
+        pbar.update(1)
+        
+        if global_tracker:
+            global_tracker['tokens_seen'] += batch_tokens
+
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            logits = model(input_ids)
+            loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+        loss = loss / GRAD_ACCUM_STEPS
+        scaler.scale(loss).backward()
+
+        if step % GRAD_ACCUM_STEPS == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+        loss_window.append(loss.item() * GRAD_ACCUM_STEPS) # Store actual loss
+        avg_loss = sum(loss_window) / len(loss_window)
+        
+        # ETA
+        eta_str = "??"
+        if global_tracker:
+             elapsed = time.time() - global_tracker['start_time']
+             rate = global_tracker['tokens_seen'] / max(elapsed, 1e-6)
+             remaining = ESTIMATED_TOTAL_TOKENS - global_tracker['tokens_seen']
+             eta_seconds = remaining / max(rate, 1e-6)
+             eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
+
+        pbar.set_description(f"Mixed | TS% {p_ts*100:.1f} | ETA: {eta_str} | L: {avg_loss:.4f}")
+
+    pbar.close()
+    print(f"Mixed Phase Complete. Tokens: {total_phase_tokens:,}")
+    validate(model, "incredible45/Gutenberg-BookCorpus-Cleaned-Data-English", device)
 
 
 def train_phase(model, optimizer, scaler, dataset_name, phase_name, num_epochs, target_lr, vocab_size, max_tokens=None, global_tracker=None, soft_cap=False):
@@ -254,43 +377,19 @@ def train():
         'tokens_seen': 0
     }
 
-    # PHASE 1
-
-    train_phase(
+    # MIXED PHASE (TinyStories + Gutenberg)
+    
+    train_mixed_phase(
         model=model,
         optimizer=optimizer,
         scaler=scaler,
-        dataset_name="roneneldan/TinyStories",
-        phase_name="Phase 1 (TinyStories)",
-        num_epochs=1,
-        target_lr=LR_PHASE_1,
         vocab_size=vocab_size,
-        max_tokens=25_000_000, # Cap at 25M
-        global_tracker=global_tracker,
-        soft_cap=True
+        global_tracker=global_tracker
     )
     
-    torch.save(model.state_dict(), f"{MODEL_FOLDER}/checkpoint_phase1.pt")
+    torch.save(model.state_dict(), f"{MODEL_FOLDER}/checkpoint_mixed.pt")
 
-    # PHASE 2
-
-    train_phase(
-        model=model,
-        optimizer=optimizer,
-        scaler=scaler,
-        dataset_name="incredible45/Gutenberg-BookCorpus-Cleaned-Data-English", 
-        phase_name="Phase 2 (Gutenberg-BookCorpus-Cleaned-Data-English)",
-        num_epochs=1, # Soft Cap controls duration within epoch
-        target_lr=LR_PHASE_2,
-        vocab_size=vocab_size,
-        max_tokens=550_000_000, # SOFT CAP AT 550 MILLION
-        global_tracker=global_tracker,
-        soft_cap=True
-    )
-    
-    torch.save(model.state_dict(), f"{MODEL_FOLDER}/checkpoint_phase2.pt")
-
-    # PHASE 3
+    # PHASE 3 (FineWeb)
     
 
     train_phase(
