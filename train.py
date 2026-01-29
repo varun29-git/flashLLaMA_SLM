@@ -265,7 +265,7 @@ def train():
         num_epochs=1,
         target_lr=LR_PHASE_1,
         vocab_size=vocab_size,
-        max_tokens=40_000_000, # Cap at 40M
+        max_tokens=30_000_000, # Cap at 30M
         global_tracker=global_tracker,
         soft_cap=True
     )
@@ -283,7 +283,7 @@ def train():
         num_epochs=1, # Soft Cap controls duration within epoch
         target_lr=LR_PHASE_2,
         vocab_size=vocab_size,
-        max_tokens=330_000_000, # SOFT CAP AT 330 MILLION
+        max_tokens=440_000_000, # SOFT CAP AT 440 MILLION
         global_tracker=global_tracker,
         soft_cap=True
     )
@@ -299,10 +299,10 @@ def train():
         scaler=scaler,
         dataset_name="HuggingFaceFW/fineweb-edu",
         phase_name="Phase 3 (FineWeb-Edu 1B)",
-        num_epochs=2,
+        num_epochs=1,
         target_lr=LR_PHASE_3,
         vocab_size=vocab_size,
-        max_tokens=600_000_000, # 600M per epoch (Total 1.2B) 
+        max_tokens=1_100_000_000, # 1.1B per epoch (Total 1.1B) 
         global_tracker=global_tracker,
         soft_cap=True
     )
