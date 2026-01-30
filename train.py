@@ -118,7 +118,12 @@ def train_cosmopedia(model, optimizer, scaler, vocab_size, global_tracker=None):
     # Initialize Dataset
     print("\nLoading Cosmopedia (web_samples_v2)...")
     ds_cosmo = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train", streaming=True)
-    dl_cosmo = DataLoader(StreamingLanguageModelDataset(ds_cosmo, SEQ_LEN, tokenizer), batch_size=BATCH_SIZE, num_workers=0)
+    dl_cosmo = DataLoader(
+        StreamingLanguageModelDataset(ds_cosmo, SEQ_LEN, tokenizer), 
+        batch_size=BATCH_SIZE, 
+        num_workers=4, 
+        pin_memory=True
+    )
 
     iter_cosmo = iter(dl_cosmo)
 
