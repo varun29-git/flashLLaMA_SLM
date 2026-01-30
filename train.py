@@ -7,6 +7,7 @@ import warnings
 import time
 from collections import deque
 from datasets import load_dataset
+from tokenizers import Tokenizer
 
 from config import *
 from model import build_llama
@@ -14,7 +15,7 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-TOTAL_TRAINING_TOKENS = 100_000_000
+TOTAL_TRAINING_TOKENS = 300_000_000
 
 def get_lr(tokens_seen):
     # Simple Cosine Decay for 100M tokens
@@ -96,35 +97,36 @@ def validate(model, dataset_name, device, steps=50):
     return avg_val_loss
 
 
-def train_mixed(model, optimizer, scaler, vocab_size, global_tracker=None):
+def train_sequential(model, optimizer, scaler, vocab_size, global_tracker=None):
     device = next(model.parameters()).device
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     
-    # Configuration
-    total_duration = TOTAL_TRAINING_TOKENS
-    
-    phase_name = "Training: Mixed (Cosmo 90% | TS 10%)"
-    print("\n" + "=" * 80)
-    print(f"STARTING PHASE: {phase_name}")
-    print(f"Duration: {total_duration:,} tokens")
-    print("=" * 80)
+    # Load Tokenizer
+    try:
+        tokenizer = Tokenizer.from_file("tokenizer.json")
+        print("Loaded custom tokenizer from tokenizer.json")
+    except Exception as e:
+        print(f"CRITICAL: Failed to load tokenizer.json ({e})")
+        return
 
+    PHASE1_TOKENS = 15_000_000
+    TOTAL_TOKENS = TOTAL_TRAINING_TOKENS
+    
     # Initialize Datasets
-    # 1. Cosmopedia (Web Samples v2)
-    ds_main = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train", streaming=True)
-    # 2. TinyStories
+    print("\nLoading Datasets...")
+    # Phase 1: TinyStories
     ds_ts = load_dataset("roneneldan/TinyStories", split="train", streaming=True)
-
-    dl_main = DataLoader(StreamingLanguageModelDataset(ds_main, SEQ_LEN, "cl100k_base"), batch_size=BATCH_SIZE, num_workers=0)
-    dl_ts = DataLoader(StreamingLanguageModelDataset(ds_ts, SEQ_LEN, "cl100k_base"), batch_size=BATCH_SIZE, num_workers=0)
-
-    iter_main = iter(dl_main)
-    iter_ts = iter(dl_ts)
-
-    total_phase_tokens = 0
+    dl_ts = DataLoader(StreamingLanguageModelDataset(ds_ts, SEQ_LEN, tokenizer), batch_size=BATCH_SIZE, num_workers=0)
     
+    # Phase 2: Cosmopedia
+    ds_cosmo = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train", streaming=True)
+    dl_cosmo = DataLoader(StreamingLanguageModelDataset(ds_cosmo, SEQ_LEN, tokenizer), batch_size=BATCH_SIZE, num_workers=0)
+
+    iter_ts = iter(dl_ts)
+    iter_cosmo = iter(dl_cosmo)
+
     # Progress Bar
-    pbar = tqdm(total=total_duration // (BATCH_SIZE * SEQ_LEN), dynamic_ncols=True)
+    pbar = tqdm(total=TOTAL_TOKENS // (BATCH_SIZE * SEQ_LEN), dynamic_ncols=True)
     
     model.train()
     loss_window = deque(maxlen=50)
@@ -133,46 +135,91 @@ def train_mixed(model, optimizer, scaler, vocab_size, global_tracker=None):
     step = 0
     current_lr = 0.0
     
-    while total_phase_tokens < total_duration:
+    # --- PHASE 1: TinyStories (0 to 15M) ---
+    print("\n" + "=" * 80)
+    print(f"STARTING PHASE 1: TinyStories (Overfitting)")
+    print(f"Goal: {PHASE1_TOKENS:,} tokens")
+    print("=" * 80)
+    
+    while global_tracker['tokens_seen'] < PHASE1_TOKENS:
         step += 1
         
-        # Calculate Learning Rate
+        # LR Schedule (Global)
         current_lr = get_lr(global_tracker['tokens_seen'])
         for param_group in optimizer.param_groups:
             param_group['lr'] = current_lr
 
-        # Select Batch (90% Cosmo, 10% TS)
-        use_ts = random.random() < 0.10
-        
         try:
-            if use_ts:
-                batch = next(iter_ts)
-            else:
-                batch = next(iter_main)
+            batch = next(iter_ts)
         except StopIteration:
-            if use_ts:
-                iter_ts = iter(dl_ts)
-                batch = next(iter_ts)
-            else:
-                iter_main = iter(dl_main)
-                batch = next(iter_main)
+            iter_ts = iter(dl_ts)
+            batch = next(iter_ts)
 
         input_ids = batch["input_ids"].to(device, non_blocking=True)
         targets = batch["targets"].to(device, non_blocking=True)
         
         batch_tokens = input_ids.numel()
-        total_phase_tokens += batch_tokens
+        
+        # Train Step
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            logits = model(input_ids)
+            loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+        loss = loss / GRAD_ACCUM_STEPS
+        scaler.scale(loss).backward() # type: ignore
+
+        if step % GRAD_ACCUM_STEPS == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+        
+        # Updates
+        global_tracker['tokens_seen'] += batch_tokens
         pbar.update(1)
         
-        if global_tracker:
-            global_tracker['tokens_seen'] += batch_tokens
+        loss_window.append(loss.item() * GRAD_ACCUM_STEPS)
+        avg_loss = sum(loss_window) / len(loss_window)
+        
+        pbar.set_postfix({
+            "Phase": "TS",
+            "LR": f"{current_lr:.1e}",
+            "L": f"{avg_loss:.2f}"
+        })
+
+    print(f"\nPhase 1 Complete. Tokens: {global_tracker['tokens_seen']:,}")
+    
+    # --- PHASE 2: Cosmopedia (15M to 100M) ---
+    print("\n" + "=" * 80)
+    print(f"STARTING PHASE 2: Cosmopedia")
+    print(f"Goal: {TOTAL_TOKENS:,} tokens")
+    print("=" * 80)
+    
+    while global_tracker['tokens_seen'] < TOTAL_TOKENS:
+        step += 1
+        
+        current_lr = get_lr(global_tracker['tokens_seen'])
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+
+        try:
+            batch = next(iter_cosmo)
+        except StopIteration:
+            iter_cosmo = iter(dl_cosmo)
+            batch = next(iter_cosmo)
+
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        targets = batch["targets"].to(device, non_blocking=True)
+        
+        batch_tokens = input_ids.numel()
 
         with torch.autocast(device_type=device.type, dtype=torch.float16):
             logits = model(input_ids)
             loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         loss = loss / GRAD_ACCUM_STEPS
-        scaler.scale(loss).backward()
+        scaler.scale(loss).backward() # type: ignore
 
         if step % GRAD_ACCUM_STEPS == 0:
             scaler.unscale_(optimizer)
@@ -181,28 +228,29 @@ def train_mixed(model, optimizer, scaler, vocab_size, global_tracker=None):
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
+        global_tracker['tokens_seen'] += batch_tokens
+        pbar.update(1)
+
         loss_window.append(loss.item() * GRAD_ACCUM_STEPS)
         avg_loss = sum(loss_window) / len(loss_window)
         
         # ETA
         eta_str = "??"
-        if global_tracker:
-             elapsed = time.time() - global_tracker['start_time']
-             rate = global_tracker['tokens_seen'] / max(elapsed, 1e-6)
-             remaining = TOTAL_TRAINING_TOKENS - global_tracker['tokens_seen']
-             eta_seconds = remaining / max(rate, 1e-6)
-             eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
+        elapsed = time.time() - global_tracker['start_time']
+        rate = global_tracker['tokens_seen'] / max(elapsed, 1e-6)
+        remaining = TOTAL_TOKENS - global_tracker['tokens_seen']
+        eta_seconds = remaining / max(rate, 1e-6)
+        eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
 
         pbar.set_postfix({
-            "TS": "10%" if use_ts else "0%",
+            "Phase": "Cosmo",
             "LR": f"{current_lr:.1e}",
             "L": f"{avg_loss:.2f}",
             "ETA": eta_str
         })
 
     pbar.close()
-    print(f"Training Complete. Tokens: {total_phase_tokens:,}") 
-
+    print(f"Training Complete. Total Tokens: {global_tracker['tokens_seen']:,}")
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -214,12 +262,11 @@ def train():
 
     Path(MODEL_FOLDER).mkdir(parents=True, exist_ok=True)
     
-    vocab_size = 100277
+    vocab_size = VOCAB_SIZE
     model = get_model(vocab_size).to(device)
     
     scaler = torch.cuda.amp.GradScaler(enabled=(device.type == 'cuda'))
     
-    # Initialize Optimizer
     # Initialize Optimizer
     optimizer = None
     try:
@@ -251,7 +298,7 @@ def train():
         'tokens_seen': 0
     }
 
-    train_mixed(
+    train_sequential(
         model=model,
         optimizer=optimizer,
         scaler=scaler,
