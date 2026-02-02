@@ -15,7 +15,7 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-TOTAL_TRAINING_TOKENS = 5_000_000
+TOTAL_TRAINING_TOKENS = 2_000_000_000
 
 def get_lr(tokens_seen):
     # Simple Cosine Decay for 100M tokens

@@ -182,8 +182,8 @@ def train_finetune():
 
     # Data
     # Mixed Instruction Mix: SmolTalk (65%) | SlimOrca (20%) | TinyCodes (15%)
-    # Max tokens: 50k (dry run) -> 13 steps
-    train_dataset = MixedInstructionDataset(tokenizer, max_length=FT_SEQ_LEN, max_steps=13)
+    # Max tokens: 200M (approx 48k steps) -> 50k steps
+    train_dataset = MixedInstructionDataset(tokenizer, max_length=FT_SEQ_LEN, max_steps=50000)
     train_loader = DataLoader(train_dataset, batch_size=FT_BATCH_SIZE, num_workers=1, pin_memory=True)
 
     # Optimizer
