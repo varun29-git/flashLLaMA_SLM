@@ -108,10 +108,6 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     
     # Define mapping functions
     def map_tulu_code(x):
-        # Keys: ['id', 'prompt', 'messages']
-        # Messages: [{'role': '...', 'content': '...'}]
-        # For pre-training, we just want the text. Concatenate prompt + all messages?
-        # Or just use messages content appropriately.
         text = ""
         for m in x.get('messages', []):
             role = m['role'] # usually user/assistant
@@ -137,26 +133,24 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     def keep_text_only(ds):
         return ds.select_columns(["text"])
 
-    # 1. Cosmopedia (50%)
+    # Cosmopedia 
     ds_cosmo = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train", streaming=True)
     ds_cosmo = keep_text_only(ds_cosmo)
     
-    # 2. FineWeb-Edu (30%) - NOTE: WEIGHT WAS 30% IN PREVIOUS TURNS FOR FW
+    # FineWeb-Edu 
     ds_fineweb = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
     ds_fineweb = keep_text_only(ds_fineweb)
     
-    # 3. Tulu-3-Code (10%) - Replaces Tiny-Codes
+    # Tulu-3-Code 
     ds_code = load_dataset("allenai/tulu-3-sft-personas-code", split="train", streaming=True)
     ds_code = ds_code.map(map_tulu_code) 
     ds_code = keep_text_only(ds_code)
 
-    # 4. DCLM (mlfoundations/dclm-baseline-1.0) (10%)
-    # DCLM typically has a 'text' column. 
+    # DCLM 
     ds_dclm = load_dataset("mlfoundations/dclm-baseline-1.0", split="train", streaming=True)
     ds_dclm = keep_text_only(ds_dclm)
 
     # Weights
-    # Cosmopedia: 0.5, FineWeb: 0.3, Code(Tulu): 0.1, DCLM: 0.1
     probabilities = [0.5, 0.3, 0.1, 0.1]
     
     print("\n" + "="*50)
@@ -172,8 +166,6 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     
     # Interleave
     print(f"Interleaving datasets with probabilities: {probabilities}")
-    # We must disable features/decoding if schemas mismatch, but select_columns should align them.
-    # stopping_strategy="first_exhausted" is safe.
     mixed_dataset = interleave_datasets(
         [ds_cosmo, ds_fineweb, ds_code, ds_dclm],
         probabilities=probabilities,

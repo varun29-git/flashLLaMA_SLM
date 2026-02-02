@@ -55,7 +55,6 @@ def map_slimorca(x):
         val = c['value']
         # Map roles
         if role == 'system':
-            # Prepend system prompt to user or just label it
             text += f"System: {val}\n"
         elif role == 'human':
             text += f"User: {val}\n\n"
@@ -74,19 +73,19 @@ class MixedInstructionDataset(Dataset):
         
         print("Loading datasets for mixing...")
         
-        # SmolTalk (65%)
+        # SmolTalk 
         print("   - HuggingFaceTB/smoltalk (General) (65%)")
         ds_smol = load_dataset("HuggingFaceTB/smoltalk", "all", split="train", streaming=True)
         ds_smol = ds_smol.map(map_smoltalk)
         ds_smol = ds_smol.select_columns(["text"])
         
-        # Tiny-Codes (15%)
+        # Tiny-Codes 
         print("   - nampdn-ai/tiny-codes (15%)")
         ds_code = load_dataset("nampdn-ai/tiny-codes", split="train", streaming=True)
         ds_code = ds_code.map(map_tiny_codes)
         ds_code = ds_code.select_columns(["text"])
         
-        # SlimOrca (20%) 
+        # SlimOrca 
         print("   - Open-Orca/SlimOrca (20%)")
         ds_orca = load_dataset("Open-Orca/SlimOrca", split="train", streaming=True)
         ds_orca = ds_orca.map(map_slimorca)
@@ -181,8 +180,6 @@ def train_finetune():
         print(f"WARNING: Checkpoint {CHECKPOINT_PATH} not found! Starting from scratch.")
 
     # Data
-    # Mixed Instruction Mix: SmolTalk (65%) | SlimOrca (20%) | TinyCodes (15%)
-    # Max tokens: 200M (approx 48k steps) -> 50k steps
     train_dataset = MixedInstructionDataset(tokenizer, max_length=FT_SEQ_LEN, max_steps=50000)
     train_loader = DataLoader(train_dataset, batch_size=FT_BATCH_SIZE, num_workers=1, pin_memory=True)
 
@@ -227,6 +224,4 @@ def train_finetune():
 
 if __name__ == "__main__":
     warnings.filterwarnings("ignore")
-    # Mapping pickling fix: ensure mappers are importable or use 'dill', 
-    # but here they are top-level so standard pickle works with num_workers>0
     train_finetune()
