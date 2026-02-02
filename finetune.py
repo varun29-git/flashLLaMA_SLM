@@ -181,9 +181,7 @@ def train_finetune():
         print(f"WARNING: Checkpoint {CHECKPOINT_PATH} not found! Starting from scratch.")
 
     # 4. Data
-    # Dry Run: 50k tokens / (4 * 1024) ~= 12.2 steps -> 13 steps
-    train_dataset = MixedInstructionDataset(tokenizer, max_length=FT_SEQ_LEN, max_steps=13)
-    train_loader = DataLoader(train_dataset, batch_size=FT_BATCH_SIZE, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=FT_BATCH_SIZE, num_workers=1, pin_memory=True)
 
     # 5. Optimizer
     optimizer = bnb.optim.AdamW8bit(model.parameters(), lr=FT_LR)

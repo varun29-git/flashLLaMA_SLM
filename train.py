@@ -15,7 +15,7 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-TOTAL_TRAINING_TOKENS = 500_000
+TOTAL_TRAINING_TOKENS = 5_000_000
 
 def get_lr(tokens_seen):
     # Simple Cosine Decay for 100M tokens
@@ -158,6 +158,15 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     # Weights
     # Cosmopedia: 0.5, FineWeb: 0.3, Code(Tulu): 0.1, DCLM: 0.1
     probabilities = [0.5, 0.3, 0.1, 0.1]
+    
+    print("\n" + "="*50)
+    print("DATASET CONFIGURATION")
+    print("="*50)
+    print(f"1. HuggingFaceTB/cosmopedia (Web)       : {probabilities[0]*100}%")
+    print(f"2. HuggingFaceFW/fineweb-edu (Edu)      : {probabilities[1]*100}%")
+    print(f"3. allenai/tulu-3-sft-personas-code     : {probabilities[2]*100}%")
+    print(f"4. mlfoundations/dclm-baseline-1.0      : {probabilities[3]*100}%")
+    print("="*50 + "\n")
     
     from datasets import interleave_datasets
     
