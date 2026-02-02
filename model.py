@@ -75,6 +75,16 @@ class ResidualConnection(nn.Module):
     
 # ------------------------------------------------------------------------------------------------------
 
+
+def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int, dim: int):
+    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
+    values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
+    return keys, values
+
+# Compile the function if PyTorch 2.0+ is available
+if hasattr(torch, "compile"):
+    repeat_kv = torch.compile(repeat_kv)
+
 class GQA_Flash_RoPE(nn.Module):
     
     def __init__(self, d_model, num_q_heads, num_kv_heads, dropout):
@@ -192,8 +202,7 @@ class GQA_Flash_RoPE(nn.Module):
         
         # Broadcast key and value
         num_groups = self.num_q_heads // self.num_kv_heads
-        key   = key.repeat_interleave(num_groups, dim=1)
-        value = value.repeat_interleave(num_groups, dim=1)
+        key, value = repeat_kv(key, value, num_groups, 1)
 
         # Flash attention with Pytorch
         attn_out = F.scaled_dot_product_attention(query, key, value, attn_mask=None, dropout_p=self.dropout.p if self.training else 0.0, is_causal=True)

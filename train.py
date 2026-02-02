@@ -15,7 +15,7 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-TOTAL_TRAINING_TOKENS = 1_000_000_000
+TOTAL_TRAINING_TOKENS = 500_000
 
 def get_lr(tokens_seen):
     # Simple Cosine Decay for 100M tokens
@@ -97,10 +97,28 @@ def validate(model, dataset_name, device, steps=50):
     return avg_val_loss
 
 
-def train_sequential_phases(model, optimizer, scaler, vocab_size, global_tracker=None):
+# Define mapping functions used in dataset loading
+def map_tiny_codes(x):
+    prompt = x.get('prompt')
+    if not prompt:
+        prompt = f"In the scenario of {x['scenario']}, write a {x['programming_language']} script for {x['target_audience']} about {x['main_topic']}."
+def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=None):
     device = next(model.parameters()).device
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     
+    # Define mapping functions
+    def map_tulu_code(x):
+        # Keys: ['id', 'prompt', 'messages']
+        # Messages: [{'role': '...', 'content': '...'}]
+        # For pre-training, we just want the text. Concatenate prompt + all messages?
+        # Or just use messages content appropriately.
+        text = ""
+        for m in x.get('messages', []):
+            role = m['role'] # usually user/assistant
+            content = m['content']
+            text += f"{role}: {content}\n\n"
+        return {"text": text.strip()}
+
     # Load Tokenizer
     try:
         tokenizer = Tokenizer.from_file("tokenizer.json")
@@ -108,108 +126,120 @@ def train_sequential_phases(model, optimizer, scaler, vocab_size, global_tracker
         print(f"CRITICAL: Failed to load tokenizer.json ({e})")
         return
 
-    # Phase Configs
-    # Total: 1B
-    
-    phases = [
-        {"name": "Cosmopedia (Knowledge)", "tokens": 550_000_000, "dataset_id": "HuggingFaceTB/cosmopedia", "subset": "web_samples_v2", "map_fn": None},
-        {"name": "FineWeb-Edu (Academic)", "tokens": 300_000_000, "dataset_id": "HuggingFaceFW/fineweb-edu", "subset": "sample-10BT", "map_fn": None},
-        {"name": "Evol-Instruct (Code)", "tokens": 150_000_000, "dataset_id": "nickrosh/Evol-Instruct-Code-80k-v1", "subset": None, "map_fn": lambda x: {"text": f"{x['instruction']}\n{x['output']}"}}
-    ]
+    # Dataset Configs
+    # Total: 2B
 
+
+    # Load Datasets
+    print("Loading datasets with streaming...")
+    
+    # helper to ensure we only have 'text' column to avoid interleaving schema conflicts
+    def keep_text_only(ds):
+        return ds.select_columns(["text"])
+
+    # 1. Cosmopedia (50%)
+    ds_cosmo = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train", streaming=True)
+    ds_cosmo = keep_text_only(ds_cosmo)
+    
+    # 2. FineWeb-Edu (30%) - NOTE: WEIGHT WAS 30% IN PREVIOUS TURNS FOR FW
+    ds_fineweb = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
+    ds_fineweb = keep_text_only(ds_fineweb)
+    
+    # 3. Tulu-3-Code (10%) - Replaces Tiny-Codes
+    ds_code = load_dataset("allenai/tulu-3-sft-personas-code", split="train", streaming=True)
+    ds_code = ds_code.map(map_tulu_code) 
+    ds_code = keep_text_only(ds_code)
+
+    # 4. DCLM (mlfoundations/dclm-baseline-1.0) (10%)
+    # DCLM typically has a 'text' column. 
+    ds_dclm = load_dataset("mlfoundations/dclm-baseline-1.0", split="train", streaming=True)
+    ds_dclm = keep_text_only(ds_dclm)
+
+    # Weights
+    # Cosmopedia: 0.5, FineWeb: 0.3, Code(Tulu): 0.1, DCLM: 0.1
+    probabilities = [0.5, 0.3, 0.1, 0.1]
+    
+    from datasets import interleave_datasets
+    
+    # Interleave
+    print(f"Interleaving datasets with probabilities: {probabilities}")
+    # We must disable features/decoding if schemas mismatch, but select_columns should align them.
+    # stopping_strategy="first_exhausted" is safe.
+    mixed_dataset = interleave_datasets(
+        [ds_cosmo, ds_fineweb, ds_code, ds_dclm],
+        probabilities=probabilities,
+        seed=42,
+        stopping_strategy="first_exhausted" 
+    )
+
+    # DataLoader
+    dl = DataLoader(
+        StreamingLanguageModelDataset(mixed_dataset, SEQ_LEN, tokenizer), 
+        batch_size=BATCH_SIZE, 
+        num_workers=4, 
+        pin_memory=True
+    )
+    iterator = iter(dl)
+    
     pbar = tqdm(total=TOTAL_TRAINING_TOKENS // (BATCH_SIZE * SEQ_LEN), dynamic_ncols=True)
     loss_window = deque(maxlen=50)
     optimizer.zero_grad(set_to_none=True)
     step = 0
     
     model.train()
-
-    current_phase_idx = 0
-    phase_tokens_processed = 0
     
-    # We iterate through phases sequentially
-    for i, phase in enumerate(phases):
-        print("\n" + "=" * 80)
-        print(f"STARTING PHASE {i+1}: {phase['name']}")
-        print(f"Goal: {phase['tokens']:,} tokens")
-        print("=" * 80)
+    while global_tracker['tokens_seen'] < TOTAL_TRAINING_TOKENS:
+        step += 1
         
-        # Load Dataset for this phase
-        print(f"Loading {phase['dataset_id']}...")
-        if phase['subset']:
-            ds_raw = load_dataset(phase['dataset_id'], phase['subset'], split="train", streaming=True)
-        else:
-            ds_raw = load_dataset(phase['dataset_id'], split="train", streaming=True)
-            
-        if phase['map_fn']:
-            ds = ds_raw.map(phase['map_fn'], remove_columns=["instruction", "output"])
-        else:
-            ds = ds_raw
-            
-        dl = DataLoader(
-            StreamingLanguageModelDataset(ds, SEQ_LEN, tokenizer), 
-            batch_size=BATCH_SIZE, 
-            num_workers=4, 
-            pin_memory=True
-        )
-        iterator = iter(dl)
+        # LR Schedule (Global)
+        current_lr = get_lr(global_tracker['tokens_seen'])
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            print("Dataset exhausted. Restarting iterator...")
+            iterator = iter(dl)
+            batch = next(iterator)
         
-        target_tokens_for_phase = phase['tokens']
-        tokens_in_this_phase = 0
+        input_ids = batch["input_ids"].to(device, non_blocking=True)
+        targets = batch["targets"].to(device, non_blocking=True)
+        batch_tokens = input_ids.numel()
+
+        with torch.autocast(device_type=device.type, dtype=torch.float16):
+            logits = model(input_ids)
+            loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+        loss = loss / GRAD_ACCUM_STEPS
+        scaler.scale(loss).backward() # type: ignore
+
+        if step % GRAD_ACCUM_STEPS == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
+
+        # Updates
+        global_tracker['tokens_seen'] += batch_tokens
+        pbar.update(1)
+
+        loss_window.append(loss.item() * GRAD_ACCUM_STEPS)
+        avg_loss = sum(loss_window) / len(loss_window)
         
-        while tokens_in_this_phase < target_tokens_for_phase:
-            step += 1
-            
-            # LR Schedule (Global)
-            current_lr = get_lr(global_tracker['tokens_seen'])
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = current_lr
+        eta_str = "??"
+        elapsed = time.time() - global_tracker['start_time']
+        rate = global_tracker['tokens_seen'] / max(elapsed, 1e-6)
+        remaining = TOTAL_TRAINING_TOKENS - global_tracker['tokens_seen']
+        eta_seconds = remaining / max(rate, 1e-6)
+        eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
 
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                iterator = iter(dl)
-                batch = next(iterator)
-            
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            targets = batch["targets"].to(device, non_blocking=True)
-            batch_tokens = input_ids.numel()
-
-            with torch.autocast(device_type=device.type, dtype=torch.float16):
-                logits = model(input_ids)
-                loss = loss_fn(logits.view(-1, logits.size(-1)), targets.view(-1))
-
-            loss = loss / GRAD_ACCUM_STEPS
-            scaler.scale(loss).backward() # type: ignore
-
-            if step % GRAD_ACCUM_STEPS == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-
-            # Updates
-            global_tracker['tokens_seen'] += batch_tokens
-            tokens_in_this_phase += batch_tokens
-            pbar.update(1)
-
-            loss_window.append(loss.item() * GRAD_ACCUM_STEPS)
-            avg_loss = sum(loss_window) / len(loss_window)
-            
-            eta_str = "??"
-            elapsed = time.time() - global_tracker['start_time']
-            rate = global_tracker['tokens_seen'] / max(elapsed, 1e-6)
-            remaining = TOTAL_TRAINING_TOKENS - global_tracker['tokens_seen']
-            eta_seconds = remaining / max(rate, 1e-6)
-            eta_str = f"{int(eta_seconds//3600)}h {int((eta_seconds%3600)//60)}m"
-
-            pbar.set_postfix({
-                "Ph": i+1,
-                "LR": f"{current_lr:.1e}",
-                "L": f"{avg_loss:.2f}",
-                "ETA": eta_str
-            })
+        pbar.set_postfix({
+            "LR": f"{current_lr:.1e}",
+            "L": f"{avg_loss:.2f}",
+            "ETA": eta_str
+        })
 
     pbar.close()
     print(f"Training Complete. Total Tokens: {global_tracker['tokens_seen']:,}")
@@ -260,7 +290,7 @@ def train():
         'tokens_seen': 0
     }
 
-    train_sequential_phases(
+    train_mixed_strategy(
         model=model,
         optimizer=optimizer,
         scaler=scaler,

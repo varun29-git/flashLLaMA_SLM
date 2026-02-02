@@ -9,14 +9,13 @@ def train_tokenizer():
     ds_cosmo = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v2", split="train", streaming=True)
     # 2. FineWeb-Edu
     ds_fw = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
-    # 3. Evol-Instruct-Code (20%)
-    try:
-        ds_code = load_dataset("nickrosh/Evol-Instruct-Code-80k-v1", split="train", streaming=True)
-    except Exception:
-        # Fallback if streaming fails or dataset issues (mostly for robustness)
-        ds_code = [] 
+    # 3. Tiny-Codes
+    ds_code = load_dataset("nampdn-ai/tiny-codes", split="train", streaming=True)
+    # 4. DCLM
+    ds_dclm = load_dataset("mlfoundations/dclm-baseline-1.0", split="train", streaming=True)
 
-    # Create an iterator that yields text from all three (Mix: 50/30/20)
+    # Create an iterator that yields text from all four (Mix: 50/30/10/10)
+    # Total samples: 20,000
     def batch_iterator(batch_size=1000):
         buffer = []
         
@@ -32,13 +31,22 @@ def train_tokenizer():
             if i >= 6000: break
             buffer.append(item['text'])
             
-        # Take 4000 examples from Code (20%)
-        print("Sampling Evol-Instruct (4k)...")
+        # Take 2000 examples from Code (10%)
+        print("Sampling Tiny-Codes (2k)...")
         for i, item in enumerate(ds_code):
-            if i >= 4000: break
-            # Combine instruction and output
-            text = f"{item.get('instruction', '')}\n{item.get('output', '')}"
+            if i >= 2000: break
+            # Map prompt/response
+            prompt = item.get('prompt')
+            if not prompt:
+                prompt = f"In the scenario of {item.get('scenario','')}, write a {item.get('programming_language','')} script for {item.get('target_audience','')} about {item.get('main_topic','')}."
+            text = f"{prompt}\n{item.get('response', '')}"
             buffer.append(text)
+
+        # Take 2000 examples from DCLM (10%)
+        print("Sampling DCLM (2k)...")
+        for i, item in enumerate(ds_dclm):
+            if i >= 2000: break
+            buffer.append(item['text'])
             
         print(f"Collected {len(buffer)} samples. Training tokenizer...")
         

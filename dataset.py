@@ -1,8 +1,5 @@
-# dataset.py
-
 import torch
 from torch.utils.data import IterableDataset
-import tiktoken
 
 
 class StreamingLanguageModelDataset(IterableDataset):
@@ -24,6 +21,11 @@ class StreamingLanguageModelDataset(IterableDataset):
             text = item.get("text", "") # Use get to be safe
             # Tokenizers library encode returns an Encoding object, we need .ids
             tokens = self.tokenizer.encode(text).ids
+            # Append EOS token (ID 3 based on training, or dynamic lookup)
+            eos_id = self.tokenizer.token_to_id("<EOS>")
+            if eos_id is None: eos_id = 3 # Fallback
+            tokens.append(eos_id)
+            
             token_buffer.extend(tokens)
 
             while len(token_buffer) >= self.seq_len + 1:
