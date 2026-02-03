@@ -15,7 +15,7 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-TOTAL_TRAINING_TOKENS = 3_000_000_000
+TOTAL_TRAINING_TOKENS = 2_500_000_000
 
 def get_lr(tokens_seen):
     # Simple Cosine Decay for 100M tokens
@@ -81,7 +81,7 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     ds_fineweb = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
     ds_fineweb = keep_text_only(ds_fineweb)
     
-    # Tiny Codes (Replacement for Tulu)
+    # Tiny Codes 
     ds_code = load_dataset("nampdn-ai/tiny-codes", split="train", streaming=True)
     ds_code = ds_code.map(map_tiny_codes) 
     ds_code = keep_text_only(ds_code)
