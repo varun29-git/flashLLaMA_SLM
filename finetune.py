@@ -38,13 +38,17 @@ def map_smoltalk(x):
     except:
         return {"text": ""}
 
-def map_tiny_codes(x):
-    # Keys: ['prompt', 'response', metadata...] 
-    # Used for code in finetuning now
-    prompt = x.get('prompt')
-    if not prompt:
-        prompt = f"In the scenario of {x['scenario']}, write a {x['programming_language']} script for {x['target_audience']} about {x['main_topic']}."
-    return {"text": f"User: {prompt}\n\nAssistant: {x['response']}"}
+def map_tulu_code(x):
+    # Keys: ['messages', ...]
+    try:
+        msgs = x['messages']
+        text = ""
+        for m in msgs:
+            role = "User" if m['role'] == 'user' else "Assistant"
+            text += f"{role}: {m['content']}\n\n"
+        return {"text": text.strip()}
+    except:
+        return {"text": ""}
 
 def map_slimorca(x):
     # Keys: ['conversations'] -> [{'from': 'system', 'value':...}, {'from': 'human'...}]
@@ -79,10 +83,10 @@ class MixedInstructionDataset(Dataset):
         ds_smol = ds_smol.map(map_smoltalk)
         ds_smol = ds_smol.select_columns(["text"])
         
-        # Tiny-Codes 
-        print("   - nampdn-ai/tiny-codes (15%)")
-        ds_code = load_dataset("nampdn-ai/tiny-codes", split="train", streaming=True)
-        ds_code = ds_code.map(map_tiny_codes)
+        # Tulu-3-Code (15%)
+        print("   - allenai/tulu-3-sft-personas-code (15%)")
+        ds_code = load_dataset("allenai/tulu-3-sft-personas-code", split="train", streaming=True)
+        ds_code = ds_code.map(map_tulu_code)
         ds_code = ds_code.select_columns(["text"])
         
         # SlimOrca 

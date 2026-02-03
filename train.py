@@ -15,7 +15,7 @@ from dataset import StreamingLanguageModelDataset
 import random
 import math
 
-TOTAL_TRAINING_TOKENS = 3_300_000_000
+TOTAL_TRAINING_TOKENS = 3_000_000_000
 
 def get_lr(tokens_seen):
     # Simple Cosine Decay for 100M tokens
@@ -43,22 +43,17 @@ def get_model(vocab_size):
 
 
 # Define mapping functions used in dataset loading
-def map_tiny_codes(x):
-    prompt = x.get('prompt')
-    if not prompt:
-        prompt = f"In the scenario of {x['scenario']}, write a {x['programming_language']} script for {x['target_audience']} about {x['main_topic']}."
+
 def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=None):
     device = next(model.parameters()).device
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
     
     # Define mapping functions
-    def map_tulu_code(x):
-        text = ""
-        for m in x.get('messages', []):
-            role = m['role'] # usually user/assistant
-            content = m['content']
-            text += f"{role}: {content}\n\n"
-        return {"text": text.strip()}
+    def map_tiny_codes(x):
+        prompt = x.get('prompt', '')
+        response = x.get('response', '')
+        text = f"User: {prompt}\n\nAssistant: {response}"
+        return {"text": text}
 
     # Load Tokenizer
     try:
@@ -86,9 +81,9 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     ds_fineweb = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT", split="train", streaming=True)
     ds_fineweb = keep_text_only(ds_fineweb)
     
-    # Tulu-3-Code 
-    ds_code = load_dataset("allenai/tulu-3-sft-personas-code", split="train", streaming=True)
-    ds_code = ds_code.map(map_tulu_code) 
+    # Tiny Codes (Replacement for Tulu)
+    ds_code = load_dataset("nampdn-ai/tiny-codes", split="train", streaming=True)
+    ds_code = ds_code.map(map_tiny_codes) 
     ds_code = keep_text_only(ds_code)
 
     # DCLM 
@@ -103,7 +98,7 @@ def train_mixed_strategy(model, optimizer, scaler, vocab_size, global_tracker=No
     print("="*50)
     print(f"1. HuggingFaceTB/cosmopedia (Web)       : {probabilities[0]*100}%")
     print(f"2. HuggingFaceFW/fineweb-edu (Edu)      : {probabilities[1]*100}%")
-    print(f"3. allenai/tulu-3-sft-personas-code     : {probabilities[2]*100}%")
+    print(f"3. nampdn-ai/tiny-codes (Code)          : {probabilities[2]*100}%")
     print(f"4. mlfoundations/dclm-baseline-1.0      : {probabilities[3]*100}%")
     print("="*50 + "\n")
     
